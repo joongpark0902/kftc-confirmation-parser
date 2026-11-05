@@ -1,0 +1,20 @@
+<html><body>
+<div>홍길동 님 로그인하셨습니다.</div>
+<form method="get" name="infoFrm"><select name="filter_sel"><option value="N">금융기관명</option></select><input type="text" name="filter_val"></form>
+<form name="mainFrm" method="post" target="targetFrm">
+<table class="tbl_list2">
+<thead><tr><th><input type="checkbox" name="chk_all"></th><th>No.</th><th>회사명</th><th>금융기관명</th><th>조회기준일</th><th>감사인 작성일</th><th>금융기관<br>발급일</th><th>프로젝트코드</th><th>비고</th></tr></thead>
+<tbody>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MSTR_NUM" value="202601090000001"><input type="hidden" name="BANK_CODE" value="004"><input type="hidden" name="SUB_BANK_CODE" value="004"><input type="hidden" name="INQRF_ISSU_DT" value="20260112"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="ISSU_TYPE" value="I"><input type="hidden" name="ENTP_CPNO" value="0000000000000"></td>
+ <td>1</td><td>주식회사 테스트</td><td>국민은행</td><td>2025-12-31</td><td>2026-01-09</td><td>2026-01-12</td><td>PJ-001</td><td></td>
+</tr>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MSTR_NUM" value="202603110000002"><input type="hidden" name="BANK_CODE" value="442"><input type="hidden" name="SUB_BANK_CODE" value="442"><input type="hidden" name="INQRF_ISSU_DT" value="20260311"><input type="hidden" name="PRTP_TYPE_CODE" value="3"><input type="hidden" name="ISSU_TYPE" value="I"><input type="hidden" name="ENTP_CPNO" value="0000000000000"></td>
+ <td>2</td><td>주식회사 테스트</td><td>현대해상화재보험</td><td>2025-12-31</td><td>2026-03-10</td><td>2026-03-11</td><td>PJ-001</td><td>재발급</td>
+</tr>
+</tbody></table></form>
+<div class="paging"><a href="javascript:go_paging(1)">1</a> <a href="javascript:go_paging(2)">2</a></div>
+<p>(총 : 3개)</p>
+<button onclick="javascript:bmanlist();">발급내역 열람·출력</button>
+</body></html>

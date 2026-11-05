@@ -1,0 +1,22 @@
+# 고객 자료·산출물은 절대 커밋하지 않음
+*.pdf
+*.zip
+*.xlsx
+*.xlsm
+*.xls
+*.png
+*.jpg
+참고/
+downloads/
+설정/
+보조자료/
+*_정리/
+probe/
+chrome-kftc/
+bc_numbers.json
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# README 예시 이미지(가짜 데이터)만 허용
+!docs/images/*.png

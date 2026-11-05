@@ -1,0 +1,22 @@
+<html><body>
+<form name="mainFrm" method="post">
+<input type="hidden" name="MSTR_NUM" value="202601090000001">
+<table class="tbl_list2">
+<tbody>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MNGT_NUM" value="1"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="PRT_CNT" value="0"></td>
+ <td>1</td><td>주식회사 테스트</td><td>123-45-67890</td><td>발급완료</td>
+ <td><button type="button" onclick="javascript:downloadPdf('202601090000001','1')">다운로드</button></td><td>생성완료</td>
+</tr>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MNGT_NUM" value="2"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="PRT_CNT" value="0"></td>
+ <td>2</td><td>테스트 망원점</td><td>123-45-67891</td><td>발급완료</td>
+ <td><button type="button" onclick="javascript:downloadPdf('202601090000001','2')">다운로드</button> <button type="button" onclick="javascript:cancelPdf('202601090000001','2')">취소</button></td><td>생성완료</td>
+</tr>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MNGT_NUM" value="3"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="PRT_CNT" value="0"></td>
+ <td>3</td><td>테스트 잠실점</td><td>123-45-67892</td><td>미발급</td>
+ <td></td><td></td>
+</tr>
+</tbody></table></form>
+</body></html>

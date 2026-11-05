@@ -1,0 +1,26 @@
+<html><body>
+<div>홍길동 님 로그인하셨습니다.</div>
+<form name="mainFrm" method="post">
+<input type="hidden" name="MSTR_NUM" value="202601090000001">
+<table class="tbl_list2">
+<thead><tr><th rowspan="2"><input type="checkbox" name="chk_all"></th><th rowspan="2">No.</th><th rowspan="2">사업자명</th><th rowspan="2">사업자등록번호</th><th rowspan="2">발급상태</th><th colspan="2">파일(PDF)다운로드 <button type="button" onclick="javascript:window.location.reload()">상태갱신</button></th></tr>
+<tr><th>요청/다운로드</th><th>생성상태</th></tr></thead>
+<tbody>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MNGT_NUM" value="1"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="PRT_CNT" value="0"></td>
+ <td>1</td><td>주식회사 테스트</td><td>123-45-67890</td><td>발급완료</td>
+ <td><button type="button" onclick="javascript:downloadPdf('202601090000001','1')">다운로드</button></td><td>생성완료</td>
+</tr>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MNGT_NUM" value="2"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="PRT_CNT" value="0"></td>
+ <td>2</td><td>테스트 망원점</td><td>123-45-67891</td><td>발급완료</td>
+ <td><button type="button" onclick="javascript:requestPdf('202601090000001','2','1')">요청</button></td><td>미요청</td>
+</tr>
+<tr>
+ <td><input type="checkbox" name="chk"><input type="hidden" name="MNGT_NUM" value="3"><input type="hidden" name="PRTP_TYPE_CODE" value="1"><input type="hidden" name="PRT_CNT" value="0"></td>
+ <td>3</td><td>테스트 잠실점</td><td>123-45-67892</td><td>미발급</td>
+ <td></td><td></td>
+</tr>
+</tbody></table></form>
+<p>(총 : 3개)</p>
+</body></html>
