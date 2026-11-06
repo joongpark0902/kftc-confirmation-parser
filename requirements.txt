@@ -3,3 +3,6 @@ openpyxl>=3.1
 customtkinter>=5.2
 playwright>=1.40
 pywin32>=306; sys_platform == "win32"
+tkinterdnd2>=0.3  # 다시 생성 창의 끌어다 놓기(없으면 경로 입력만)
+winocr>=0.0.15; sys_platform == "win32"  # 스캔본 OCR(선택, 없으면 건너뜀)
+pypdfium2>=4  # OCR용 PDF 렌더(pdfplumber 의존성)

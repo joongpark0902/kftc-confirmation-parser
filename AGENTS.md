@@ -31,7 +31,8 @@
 
 ## 구조
 
-- `프로그램/confirm_parser.py` 조회서 PDF 파서 (양식: bank / insurance / guarantee)
+- `프로그램/confirm_parser.py` 조회서 PDF 파서 (양식: bank / insurance / guarantee / securities / card)
+- `프로그램/ocr_scan.py` 스캔본 OCR(Windows 내장 한국어 OCR, 추정값만 — 금액 시트 자동 기입 금지)
 - `프로그램/excel_writer.py` BC조서 작성, `carry_over.py` 이전 버전 입력값 이식
 - `프로그램/wolbo_parser.py` 은행연합회 월보 파서·기관명 매칭(`_ALIASES`)
 - `프로그램/kftc_engine.py` 사이트 목록·상세 파싱, PDF 생성·다운로드 (Playwright로 디버그 포트 9222 크롬에 연결)
@@ -43,4 +44,4 @@
 ```
 테스트실행.bat
 ```
-또는 `PYTHONPATH=프로그램 python -m unittest discover -s tests -t .` (가짜 데이터 38개).
+또는 `PYTHONPATH=프로그램 python -m unittest discover -s tests -t .` (가짜 데이터 55개).

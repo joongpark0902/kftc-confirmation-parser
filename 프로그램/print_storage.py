@@ -130,6 +130,7 @@ class PrintStore:
             raise ValueError('조회 대상과 문서가 다르거나 열람용 PDF입니다')
         key = self.site_key(item,site) + '|' + kind
         self.data['records'][key] = {'item_key':self.item_key(item),'site':site.mngt_num,'kind':kind,
+            'company':item.company or '',
             'file':str(path.relative_to(self.folder)),'sha256':digest(path),'info':asdict(info),
             'saved_at':dt.datetime.now().isoformat(timespec='seconds')}
         self._save()

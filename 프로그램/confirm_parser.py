@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """금융결제원 발급 금융거래조회서(은행/보험회사/보증기관) PDF 파서.
 
-입력: PDF 또는 금결원 다운로드 zip(내부 PDF 1개)
+입력: PDF 또는 zip(내부 PDF 전부)
 출력: ConfirmDoc (헤더·꼬리·항목별 표 행)
 """
 from __future__ import annotations
@@ -25,10 +25,13 @@ SUBHEADER_TOKENS = {
     "약정한도액", "대출금액", "연이율", "연이자율", "최종이자지급일", "최종이자 지급일",
     "보장성보험료및 사업비", "보장성보험료 및 사업비", "이외", "시작", "종료",
     "대출·융자·투자금액", "매입금액", "매도금액", "회사(개인)", "대상 여신", "간",
+    "상품명", "거래번호",                       # 증권사 거래내역 2단 머리글
 }
-FORM_LABEL = {"bank": "은행", "insurance": "보험회사", "guarantee": "보증기관"}
-FORM_ORDER = {"bank": 0, "insurance": 1, "guarantee": 2}
+FORM_LABEL = {"bank": "은행", "insurance": "보험회사", "guarantee": "보증기관", "securities": "증권회사", "card": "카드사"}
+FORM_ORDER = {"bank": 0, "insurance": 1, "guarantee": 2, "securities": 3, "card": 4}
 SCAN_STATUS = "스캔본-수동입력필요"
+SENT_STATUS = "발송본(회신 아님)"
+NA_STATUS = "대상 아님(변호사조회서)"
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,33 @@ FORMS: dict[str, dict[int, Section]] = {
                    ("내용", "연대보증등을 제공 받은 회사(개인)", "연대보증 등의 대상 보증·융자 등", "연대보증 등의 한도", "담보제공한 자산"),
                    money=("연대보증 등의 한도",)),
         9: _COLLATERAL,
+    },
+    # 금결원 증권회사용 조회서 (한국투자증권 FY2025 실물 기준)
+    "securities": {
+        1: Section("유가증권 등 금융상품", r"^계좌번호금융상품의종류",
+                   ("계좌번호", "금융상품의 종류", "금융상품 금액", "예수금", "신용설정 보증금", "미수금액", "담보제공 및 처분제한 등"),
+                   money=("금융상품 금액", "예수금", "신용설정 보증금", "미수금액")),
+        2: Section("유가증권 상세명세", r"^계좌번호종목명",
+                   ("계좌번호", "종목명", "수량", "액면금액", "기준가", "평가액", "만기일", "담보제공 내역", "비고"),
+                   money=("수량", "액면금액", "기준가", "평가액"), dates=("만기일",)),
+        3: Section("대출", r"^계좌번호대출종류",
+                   ("계좌번호", "대출 종류", "약정한도액", "대출금액", "대출일", "최종만기일", "연이율", "최종이자지급일", "상환방법", "담보 보증 및 관련약정"),
+                   money=("약정한도액", "대출금액"), dates=("대출일", "최종만기일", "최종이자지급일"), rates=("연이율",)),
+        4: _GUARANTEE_CMT_INS,
+        5: Section("미결제 파생상품", r"^계좌번호계약의종류",
+                   ("계좌번호", "계약의 종류", "종목명", "계약일", "매수/매도", "계약수량", "계약체결 당시 매수/매도 가격", "평가금액", "계약실행일/만기일", "행사가격 등"),
+                   money=("평가금액",), dates=("계약일",)),
+        6: _THIRD_PARTY,
+        7: _NOTE_CUSTODY,
+        8: _COLLATERAL,
+        9: Section("거래내역", r"^거래일자",
+                   ("거래일자/상품명", "거래번호", "계좌번호/계약번호", "FCM", "적요명/종목명", "수량/단가", "거래금액/정산금액",
+                    "수수료/제세금", "신용·상환 금액/이자", "미수발생 금액/미수·연체료변제", "예수금 잔고/유가증권잔고", "처리부점명"),
+                   min_cols=6),
+    },
+    # 카드사 자체 양식(법인카드 잔액) — 지급보증 및 기타약정 시트 열 구조로 담는다
+    "card": {
+        1: _GUARANTEE_CMT_INS,
     },
 }
 
@@ -221,6 +251,10 @@ def is_no_txn(row) -> bool:
 # ---------------------------------------------------------------------------
 def detect_form(text: str) -> Optional[str]:
     t = _squash(text or "")
+    if "유가증권등금융상품의내용" in t:
+        return "securities"
+    if "카드" in t and "금융거래조회서" in t and "법인카드" in t:
+        return "card"
     if "당은행에대한금융상품" in t:
         return "bank"
     if "당사에대한보험거래" in t:
@@ -230,9 +264,21 @@ def detect_form(text: str) -> Optional[str]:
     return None
 
 
+# '사업 자 등록번호'·'사 업 자등록번호'처럼 은행마다 띄어쓰기가 다르고, 글꼴이 깨진 PDF는 글자 사이에 '）'가 끼기도 한다.
+_SEP = r"[\s）)]*"
 _HEADER_RE = re.compile(
-    r"조회대상\s*회사\s*[:：]\s*(?P<company>.+?)\s*사\s*업자등록번호\s*[:：]\s*(?P<biz>[\d\-]+)"
+    r"조회대상\s*회사\s*[:：]\s*(?P<company>.*?)\s*사" + _SEP + "업" + _SEP + "자" + _SEP + r"등\s*록\s*번\s*호\s*[:：]\s*(?P<biz>[\d\-]+)"
     r"\s*조회기준일\s*[:：]\s*(?P<y>\d{4})\s*년\s*(?P<m>\d{1,2})\s*월\s*(?P<d>\d{1,2})\s*일")
+_FULLWIDTH = str.maketrans({"（": "(", "）": ")", "㈜": "(주)"})
+_LEGAL_ONLY = re.compile(r"\((주|유|유한|사|재)\)|주식회사|유한회사|유한책임회사|[()\s]")
+
+
+def clean_company(name: str) -> str:
+    """전각 괄호를 반각으로, 글꼴 깨짐으로 반복된 ')'를 하나로. 법인격 표기만 남으면 빈 문자열."""
+    s = (name or "").translate(_FULLWIDTH)
+    s = re.sub(r"\)+", ")", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return "" if not _LEGAL_ONLY.sub("", s) else s
 
 
 _FIRM_RE = re.compile(r"(?P<firm>\S+)\s*담당공인회계사\s*[:：]?\s*(?P<cpa>\S+)\s*귀\s*중")
@@ -245,7 +291,7 @@ def parse_header(text: str) -> dict:
         out["firm"], out["cpa"] = fm.group("firm"), fm.group("cpa")
     m = _HEADER_RE.search(text or "")
     if m:
-        out["company"] = re.sub(r"\s+", " ", m.group("company")).strip()
+        out["company"] = clean_company(m.group("company"))
         out["biz_no"] = m.group("biz")
         out["ref_date"] = f"{int(m.group('y')):04d}-{int(m.group('m')):02d}-{int(m.group('d')):02d}"
     return out
@@ -259,17 +305,21 @@ def parse_footer(text: str) -> dict:
     t = text or ""
     m = _FOOTER_RE.search(t)
     if m:
-        out["issue_date"] = f"{int(m.group('y')):04d}-{int(m.group('m')):02d}-{int(m.group('d')):02d}"
+        if int(m.group('y')) and int(m.group('m')) and int(m.group('d')):
+            out["issue_date"] = f"{int(m.group('y')):04d}-{int(m.group('m')):02d}-{int(m.group('d')):02d}"
         body = re.sub(r"\s+", " ", m.group("body")).strip()
         bm = re.match(r"^(\S+)\s+은행\s*(.*)$", body)
         if bm:
-            out["institution"] = bm.group(1) + "은행"
+            out["institution"] = bm.group(1) if bm.group(1).endswith("은행") else bm.group(1) + "은행"
             out["branch"] = bm.group(2).strip()
         else:
             parts = body.split(" ", 1)
             out["institution"] = parts[0]
             out["branch"] = parts[1].strip() if len(parts) > 1 else ""
-    om = re.search(r"담당자\s*[:：]\s*(\S+)", t)
+        if re.fullmatch(r"[ＣC\s]*", out["branch"]):   # 지점 미기재 자리표시
+            out["branch"] = ""
+    # 같은 줄 안에서만 찾는다. 담당자 칸이 빈 양식(신한은행 등)에서 다음 줄 "(문의전화"를 담당자로 읽지 않도록.
+    om = re.search(r"담당자[ \t]*[:：][ \t]*([^\s(]+)", t)
     if om:
         out["officer"] = om.group(1)
     pm = re.search(r"문의전화\s*[:：]\s*([\d\-\s]+?)\s*,", t)
@@ -384,7 +434,10 @@ def extract_sections(pdf, form: str, institution: str = "") -> dict[int, dict]:
                     continue
                 if len(nonempty) == 1 and inst_key and _squash(nonempty[0]) == inst_key:
                     continue
-                if is_no_txn(cells):
+                # '해당사항없음'이 한 칸(예: 담보·처분제한 열)에만 있고 다른 칸에 값이 있으면 거래 행이다.
+                # 첫 칸이 행 이름표('미결제 전자어음', '(제3자)')면 그 칸은 빼고 본다.
+                rest = cells[1:] if (cells[0] in _ROW_LABELS or _GROUP_LABEL_RE.match(cells[0])) else cells
+                if is_no_txn(cells) and all(_squash(c) in ("", "0", "-") or any(k in _squash(c) for k in NO_TXN) for c in rest):
                     res["no_txn"] = True
                     continue
                 if _squash(cells[0]) == "합계":
@@ -415,6 +468,64 @@ def extract_sections(pdf, form: str, institution: str = "") -> dict[int, dict]:
 # ---------------------------------------------------------------------------
 # 입력 · 파일 단위 파싱
 # ---------------------------------------------------------------------------
+def parse_card(pdf, first: str) -> tuple[dict, dict, dict]:
+    """카드사 자체 양식(신한카드 법인카드 조회서 기준). 반환: header, footer, sections"""
+    t = first or ""
+    header = {"company": "", "biz_no": "", "ref_date": None, "firm": "", "cpa": ""}
+    m = re.search(r"법인명\s*(?P<c>.+?)\s*사업자등록번호\s*(?P<b>[\d\-]+)", t)
+    if m:
+        header["company"], header["biz_no"] = clean_company(m.group("c")), m.group("b")
+    m = re.search(r"조회기준일\s*(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})", t)
+    if m:
+        header["ref_date"] = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    footer = {"issue_date": None, "institution": "", "branch": "", "officer": "", "phone": "", "email": ""}
+    m = re.search(r"(\S*카드)\s*금융거래조회서", t)
+    if m:
+        footer["institution"] = m.group(1)
+    m = re.search(r"확인함\.?\s*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", t)
+    if m:
+        footer["issue_date"] = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"확인자\s*[:：]\s*(?P<dept>\S+)\s+(?P<name>[^\s(]+)\s*\((?P<tel>[\d\-]+)\)", t)
+    if m:
+        footer["branch"], footer["officer"], footer["phone"] = m.group("dept"), m.group("name"), m.group("tel")
+    spec = FORMS["card"][1]
+    res = _new_result()
+    for pi, page in enumerate(pdf.pages, start=1):
+        for tbl in page.find_tables():
+            rows = [[clean_cell(c) for c in r] for r in tbl.extract()]
+            hi = next((i for i, r in enumerate(rows) if _squash("".join(r)).startswith("거래내역기준월한도액")), None)
+            if hi is None:
+                continue
+            hdr = rows[hi]
+            res["raw"].extend(rows[hi:])
+            for r in rows[hi + 1:]:
+                cells = dict(zip([_squash(h) for h in hdr], r))
+                if _squash(r[0]) == "합계":
+                    res["note"] += "합계행 제외: " + " | ".join(c for c in r if c) + "; "
+                    break                       # 합계 아래는 안내문
+                if r[0].startswith("※"):
+                    break
+                if not any(r) or not r[0]:
+                    continue
+                kind = cells.get("거래내역", "")
+                month = cells.get("기준월", "")
+                vals = [f"{kind}({month})" if month else kind, cells.get("한도액", ""), cells.get("실행금액", ""),
+                        cells.get("수수료율", ""), cells.get("기간", ""), cells.get("담보지급보증", ""), cells.get("비고", "")]
+                row = _normalize_row(spec, vals)
+                row["_group"], row["_page"] = "", pi
+                res["rows"].append(row)
+                if pi not in res["pages"]:
+                    res["pages"].append(pi)
+    return header, footer, {1: res}
+
+
+_SENT_MARKS = ("금융거래정보제공요구서", "삼가귀사의번영을축원합니다")
+
+
+def _is_lawyer(name: str, text: str = "") -> bool:
+    return "변호사" in name or "변호사조회서" in _squash(text) or "법률사무소" in _squash(text)[:200]
+
+
 @dataclass
 class InputFile:
     path: Path
@@ -437,6 +548,8 @@ class ConfirmDoc:
     sha256: str = ""
     zip_sha256: str = ""
     saved_path: Optional[Path] = None
+    ocr_pages: Optional[list] = None        # 스캔본 OCR 페이지별 텍스트(추정)
+    ocr_summary: Optional[dict] = None
 
     @property
     def company(self) -> str:
@@ -478,18 +591,35 @@ def iter_inputs(folder: Path) -> list[InputFile]:
         elif ext == ".zip":
             try:
                 with zipfile.ZipFile(p) as zf:
+                    found = False
                     for info, name in _zip_names(zf):
                         if name.lower().endswith(".pdf"):
                             out.append(InputFile(p, "zip", zf.read(info), name))
-                            break
-                    else:
+                            found = True
+                    if not found:
                         out.append(InputFile(p, "zip", b"", None))
             except zipfile.BadZipFile:
                 out.append(InputFile(p, "zip", b"", None))
     return out
 
 
-def parse_file(inp: InputFile) -> ConfirmDoc:
+def dedupe_inputs(inputs: list[InputFile]) -> tuple[list[InputFile], list[InputFile]]:
+    """내용이 같은 PDF(폴더와 zip에 모두 있는 경우 등)는 첫 번째만 남긴다. 반환: (남긴 것, 뺀 것)"""
+    seen, keep, dup = set(), [], []
+    for inp in inputs:
+        if not inp.pdf_bytes:
+            keep.append(inp)
+            continue
+        h = sha256_bytes(inp.pdf_bytes)
+        if h in seen:
+            dup.append(inp)
+        else:
+            seen.add(h)
+            keep.append(inp)
+    return keep, dup
+
+
+def parse_file(inp: InputFile, ocr: bool = True) -> ConfirmDoc:
     doc = ConfirmDoc(source=inp)
     if inp.kind == "zip":
         doc.zip_sha256 = sha256_bytes(inp.path.read_bytes())
@@ -501,16 +631,36 @@ def parse_file(inp: InputFile) -> ConfirmDoc:
         with pdfplumber.open(io.BytesIO(inp.pdf_bytes)) as pdf:
             doc.pages = len(pdf.pages)
             first = pdf.pages[0].extract_text() or ""
+            name = (inp.inner_name or inp.path.name)
             if len(first.strip()) < 30:
                 doc.is_scan = True
+                if _is_lawyer(name):
+                    doc.status, doc.message = NA_STATUS, "BC조서 대상 아님(파일명 기준)"
+                    return doc
                 doc.status = SCAN_STATUS
                 doc.message = "텍스트 레이어 없음"
+                if ocr:
+                    from ocr_scan import ocr_pdf, summarize, hint
+                    pages = ocr_pdf(inp.pdf_bytes)
+                    if pages is not None:
+                        doc.ocr_pages, doc.ocr_summary = pages, summarize(pages)
+                        doc.message = hint(doc.ocr_summary)
                 return doc
             doc.form = detect_form(first)
+            if doc.form == "card":
+                doc.header, doc.footer, doc.sections = parse_card(pdf, first)
+                notes = [f"{n}:{r['note']}" for n, r in doc.sections.items() if r["note"]]
+                doc.status, doc.message = "성공", "; ".join(notes)
+                return doc
             doc.header = parse_header(first)
             doc.footer = parse_footer(pdf.pages[-1].extract_text() or "")
             if doc.form is None:
-                doc.status, doc.message = "양식미상", "은행/보험/보증 양식 키워드 없음"
+                if _is_lawyer(name, first):
+                    doc.status, doc.message = NA_STATUS, "BC조서 대상 아님"
+                elif any(k in _squash(first) for k in _SENT_MARKS):
+                    doc.status, doc.message = SENT_STATUS, "회사가 보낸 요청 서식(회신본 아님) — 회신본 확인"
+                else:
+                    doc.status, doc.message = "양식미상", "은행/보험/보증/증권/카드 양식 키워드 없음"
                 return doc
             doc.sections = extract_sections(pdf, doc.form, doc.institution)
             notes = [f"{n}:{r['note']}" for n, r in doc.sections.items() if r["note"]]
@@ -525,7 +675,7 @@ _BAD_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
 def tidy_name(doc: ConfirmDoc, with_branch: bool = False) -> str:
-    company = doc.company or doc.source.path.stem
+    company = doc.company or Path(doc.source.inner_name or doc.source.path.name).stem
     kind = "은행조회서" if doc.form == "bank" else "금융거래조회서"
     inst = doc.institution or "기관미상"
     if with_branch and doc.footer.get("branch"):

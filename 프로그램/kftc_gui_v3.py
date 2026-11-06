@@ -21,11 +21,51 @@ from print_storage import PrintStore, PrintCapture, StorageStatus, read_pdf_info
 import mop_bridge
 import ui_theme_v2 as theme
 
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+except Exception:  # 끌어다 놓기 모듈이 없으면 경로 입력·찾기만 쓴다.
+    TkinterDnD = DND_FILES = None
+
+
+HELP_SECTIONS = (
+    ('01  사이트 연결',
+     '[크롬 실행]을 누르면 조회서 사이트용 크롬 창이 열립니다. 그 창에서 공동인증서로 로그인한 뒤 [연결 확인]을 누르세요.\n'
+     '연결 상태에 로그인 사용자가 보이면 준비가 끝난 것입니다. 이미 열어 둔 일반 크롬 창은 연결되지 않습니다.'),
+    ('출력 설정 (처음 한 번)',
+     '오른쪽 위 [출력 설정]에서 모두의프린터 실행파일 · PDF 저장 폴더 · 출력 프린터를 지정하고 [연결 시험]을 누르세요.\n'
+     'PDF 저장 폴더는 모두의프린터 화면의 실제 저장 폴더와 같아야 합니다. 시험이 성공하면 01 구역에 확인 시간이 표시됩니다.'),
+    ('02  저장 및 정리 설정',
+     '저장 폴더: 출력본 PDF · 저장 이력 · BC조서가 모이는 곳입니다. 감사 건(회사)별로 폴더를 나누는 것을 권장합니다.\n'
+     '월보 PDF: 은행연합회 신용공여 월보입니다(선택). 넣으면 대출·지급보증을 조회서 금액과 자동 대사합니다.'),
+    ('03  발급된 조회서 → 출력본 저장',
+     '① 회사명을 입력하고 [목록 조회]를 누릅니다(비우면 발급된 전체 목록).\n'
+     '② 저장할 행을 선택하고 [선택 출력본 저장] 또는 [전체 출력본 저장]을 누릅니다. 이미 저장된 사업장은 건너뜁니다.\n'
+     '③ 사이트에서 대기 창에 안내된 사업장의 출력 뷰어를 열고, 인쇄 버튼은 직접 누르세요(프린터: 모두의프린터).\n'
+     '    현재는 인쇄를 자동으로 하지 않습니다. 시즌에 실제 화면을 확인한 뒤 자동화할 예정입니다.\n'
+     '    새 PDF의 회사 · 기관 · 기준일 · 사업장이 맞으면 프로그램이 보관하고 다음 대상으로 넘어갑니다.\n'
+     '④ "저장 후 BC조서 생성"이 체크되어 있으면 저장이 끝나는 대로 BC조서를 만듭니다.\n'
+     '저장 상태 열: 출력본 있음 / 일부 저장 / 미저장 / 열람용만 있음 / 확인 필요'),
+    ('BC조서만 다시 생성',
+     '조회서가 추가됐거나 조서를 다시 만들 때 씁니다. 03 구역의 [BC조서만 다시 생성]을 누르면 창이 열립니다.\n'
+     '① 회사를 고릅니다. 저장 폴더에 있는 출력본 중 그 회사 것만 씁니다.\n'
+     '② 기존 BC조서 엑셀을 끌어다 놓거나 경로를 붙여 넣습니다. 비워 두면 같은 회사의 가장 최근 BC조서를 씁니다.\n'
+     '③ [다시 생성]을 누르면 새 버전(_vN) 파일을 만들고, 기존 파일에 직접 입력한 검토값을 옮겨 옵니다. BC번호는 그대로 유지합니다.\n'
+     '기존 BC조서 파일은 덮어쓰지 않습니다.'),
+    ('자주 막히는 곳',
+     '· 인쇄했는데 PDF가 안 잡힘 → [출력 설정]의 PDF 저장 폴더가 모두의프린터 실제 저장 폴더와 같은지 확인하세요.\n'
+     '· "새 PDF가 여러 개입니다" → 출력 중에는 다른 문서를 인쇄하지 마세요. 정리 후 [대기 다시 시작].\n'
+     '· 5분 동안 확인 못 함 → 인쇄 상태를 확인하고 [대기 다시 시작]을 누르세요.\n'
+     '· 열람용으로 내려받은 PDF는 출력본으로 등록할 수 없습니다. 사이트 출력 기능으로 다시 저장하세요.\n'
+     '· 이미 갖고 있는 출력본은 대기 창의 [기존 출력본 연결]로 등록합니다.'),
+)
+
 
 class KftcAppV3(KftcAppV2):
     def __init__(self,selftest=False):
         self.statuses={}
         self.queue_window=None
+        self.regen_window=None
+        self.help_window=None
         self.settings_window=None
         self._scan_timer=None
         self._scanning=False
@@ -42,6 +82,12 @@ class KftcAppV3(KftcAppV2):
         except (ValueError,OSError) as exc:
             self.config_error=str(exc)
         super().__init__(selftest=selftest)
+        self._dnd_ok=False
+        if TkinterDnD is not None:
+            try:
+                TkinterDnD._require(self);self._dnd_ok=True
+            except Exception:
+                self._dnd_ok=False
         self.title('금융거래조회서 · 출력본 저장 v3')
         self.geometry('1360x880')
         self.minsize(1020,780)
@@ -72,17 +118,8 @@ class KftcAppV3(KftcAppV2):
         fields=settings.grid_slaves(row=1,column=0)[0]
         fields.grid_configure(columnspan=2)
         note=fields.grid_slaves(row=2,column=1)[0]
-        note.grid_configure(row=3)
-        note.configure(text='월보·이전 엑셀은 선택 사항입니다. 이전 엑셀을 비우면 저장 폴더의 최신 BC조서를 사용합니다.')
+        note.configure(text='월보는 선택 사항입니다. 기존 BC조서로 다시 만들 때는 03의 [BC조서만 다시 생성]을 쓰세요.')
         self.prev_var=tk.StringVar()
-        ctk.CTkLabel(fields,text='이전 BC조서',text_color=theme.MUTED,width=72,anchor='w').grid(
-            row=2,column=0,padx=(0,8),pady=4)
-        self.prev_entry=ctk.CTkEntry(fields,textvariable=self.prev_var,height=34)
-        self.prev_entry.grid(row=2,column=1,sticky='ew',pady=4)
-        self.job_controls.append(self.prev_entry)
-        self._button(fields,'찾기',self._browse_previous,width=58).grid(row=2,column=2,padx=(8,0),pady=4)
-        self.btn_parse=self._button(settings,'BC조서만 다시 생성',self._do_parse_only,width=170)
-        self.btn_parse.grid(row=0,column=1,padx=(8,16),pady=(8,4),sticky='e')
         actions=self.btn_list.master
         search=ctk.CTkFrame(actions,fg_color='transparent')
         search.pack(side='left',before=self.btn_list,padx=(0,12))
@@ -90,8 +127,14 @@ class KftcAppV3(KftcAppV2):
         self.filter_entry=ctk.CTkEntry(search,textvariable=self.filter_var,width=160,height=34)
         self.filter_entry.pack(side='left')
         self.job_controls.append(self.filter_entry)
+        self.btn_parse=self._button(search,'BC조서만 다시 생성',self._do_parse_only,width=150)
+        self.btn_parse.pack(side='left',padx=(8,0))
         header=self.grid_slaves(row=0,column=0)[0]
         self._button(header,'출력 설정',self._open_print_settings,width=104).grid(row=0,column=2,rowspan=2,padx=(16,0))
+        self.btn_help=ctk.CTkButton(header,text='사용법',command=self._open_help,width=84,height=34,
+                                    fg_color=theme.SURFACE,text_color=theme.TEXT,hover_color=theme.SELECT,
+                                    border_width=1,border_color=theme.LINE)
+        self.btn_help.grid(row=0,column=3,rowspan=2,padx=(8,0))
         columns=('no','company','bank','storage','type','ref','issued','project','note')
         self.tree.configure(columns=columns)
         for column,label,width in zip(columns,('No','회사명','금융기관','저장 상태','양식','조회기준일','발급일','프로젝트','비고'),
@@ -115,10 +158,198 @@ class KftcAppV3(KftcAppV2):
         self.mop_status_var.set(status)
         self.mop_link_label.configure(text_color=('#217A52','#83D5AB') if '시험 성공' in status else theme.MUTED)
 
-    def _browse_previous(self):
-        path=filedialog.askopenfilename(parent=self,title='입력값을 옮겨올 이전 BC조서 엑셀 선택',
+    def _browse_previous(self,parent=None):
+        path=filedialog.askopenfilename(parent=parent or self,title='입력값을 옮겨올 기존 BC조서 엑셀 선택',
             filetypes=[('Excel BC조서','*.xlsx *.xlsm')])
         if path:self.prev_var.set(path)
+
+    # ------------------------------------------------------------ 사용법
+    def _open_help(self):
+        if self.help_window is not None and self.help_window.winfo_exists():
+            self._raise_settings(self.help_window);return
+        win=ctk.CTkToplevel(self);self.help_window=win
+        win.title('사용법 · 금융거래조회서');win.geometry('760x640');win.minsize(560,420)
+        win.configure(fg_color=theme.BG);win.transient(self)
+        win.grid_columnconfigure(0,weight=1);win.grid_rowconfigure(0,weight=1)
+        body=ctk.CTkScrollableFrame(win,fg_color=theme.SURFACE)
+        body.grid(row=0,column=0,sticky='nsew',padx=18,pady=(18,8))
+        body.grid_columnconfigure(0,weight=1)
+        row=0
+        for title,text in HELP_SECTIONS:
+            ctk.CTkLabel(body,text=title,font=ctk.CTkFont(size=14,weight='bold'),text_color=theme.ACCENT,
+                         anchor='w').grid(row=row,column=0,sticky='ew',padx=12,pady=(14 if row else 6,4))
+            ctk.CTkLabel(body,text=text,justify='left',anchor='w',wraplength=660,text_color=theme.TEXT).grid(
+                row=row+1,column=0,sticky='ew',padx=12)
+            row+=2
+        ctk.CTkButton(win,text='닫기',width=90,command=win.destroy).grid(row=1,column=0,sticky='e',padx=18,pady=(0,16))
+        theme.titlebar(win);self._raise_settings(win)
+
+    # ------------------------------------------------------- BC조서 다시 생성
+    @staticmethod
+    def _clean_path(text):
+        return (text or '').strip().strip('"').strip("'").strip()
+
+    def _do_parse_only(self):
+        if self._busy:
+            self.log('현재 작업을 마친 후 다시 실행하세요.');return
+        if self.regen_window is not None and self.regen_window.winfo_exists():
+            self._raise_settings(self.regen_window);return
+        from print_parse import companies,latest_for_company,workbook_company
+        from print_storage import normalized
+        folder=Path(self.dir_var.get()).resolve()
+        try:
+            names=companies(PrintStore(folder))
+        except (ValueError,OSError) as exc:
+            messagebox.showerror('저장 이력 확인 필요',str(exc),parent=self);return
+        typed=self.filter_var.get().strip()
+        default=next((n for n in names if typed and normalized(n)==normalized(typed)),
+                     names[0] if len(names)==1 else '')
+        win=ctk.CTkToplevel(self);self.regen_window=win
+        win.title('기존 BC조서로 다시 생성');win.geometry('700x480');win.minsize(600,450)
+        win.configure(fg_color=theme.BG);win.transient(self)
+        win.grid_columnconfigure(1,weight=1)
+        company_var=tk.StringVar(value=default)
+        wolbo_var=tk.StringVar(value=self.wolbo_var.get())
+        self.prev_var.set('')
+        ctk.CTkLabel(win,text='회사').grid(row=0,column=0,padx=(18,8),pady=(18,6),sticky='w')
+        combo=ctk.CTkComboBox(win,variable=company_var,values=names or [''],height=34,state='readonly')
+        combo.grid(row=0,column=1,columnspan=2,sticky='ew',padx=(0,18),pady=(18,6))
+        ctk.CTkLabel(win,text=f'저장 폴더: {folder}   ·   출력본이 있는 회사 {len(names)}곳',text_color=theme.MUTED,
+                     font=ctk.CTkFont(size=11),anchor='w').grid(row=1,column=0,columnspan=3,sticky='ew',padx=18)
+        drop=ctk.CTkFrame(win,height=110,fg_color=theme.SURFACE,border_width=2,border_color=theme.LINE)
+        drop.grid(row=2,column=0,columnspan=3,sticky='ew',padx=18,pady=(12,8));drop.grid_propagate(False)
+        drop.grid_columnconfigure(0,weight=1);drop.grid_rowconfigure(0,weight=1)
+        drop_text=('기존 BC조서 엑셀을 여기로 끌어다 놓으세요' if self._dnd_ok
+                   else '끌어다 놓기를 쓸 수 없습니다 (tkinterdnd2 없음) — 아래에 경로를 붙여 넣거나 [찾기]를 누르세요')
+        drop_label=ctk.CTkLabel(drop,text=drop_text,text_color=theme.MUTED,wraplength=600)
+        drop_label.grid(row=0,column=0)
+        ctk.CTkLabel(win,text='경로').grid(row=3,column=0,padx=(18,8),pady=6,sticky='w')
+        ctk.CTkEntry(win,textvariable=self.prev_var,height=34,
+                     placeholder_text='경로 붙여넣기 · 비우면 같은 회사의 최신 BC조서').grid(row=3,column=1,sticky='ew',pady=6)
+        ctk.CTkButton(win,text='찾기',width=64,command=lambda:self._browse_previous(win)).grid(row=3,column=2,padx=(8,18),pady=6)
+        status=ctk.CTkLabel(win,text='',anchor='w',justify='left',wraplength=640)
+        status.grid(row=4,column=0,columnspan=3,sticky='ew',padx=18,pady=(2,8))
+        ctk.CTkLabel(win,text='월보 PDF').grid(row=5,column=0,padx=(18,8),pady=6,sticky='w')
+        ctk.CTkEntry(win,textvariable=wolbo_var,height=34,placeholder_text='선택 사항').grid(row=5,column=1,sticky='ew',pady=6)
+        def browse_wolbo():
+            p=filedialog.askopenfilename(parent=win,title='월보 PDF',filetypes=[('PDF','*.pdf')])
+            if p:wolbo_var.set(p)
+        ctk.CTkButton(win,text='찾기',width=64,command=browse_wolbo).grid(row=5,column=2,padx=(8,18),pady=6)
+        ctk.CTkLabel(win,text='기존 파일은 덮어쓰지 않습니다. 새 버전(_vN)을 만들고 기존 파일의 입력값을 옮기며 BC번호는 유지합니다.',
+                     text_color=theme.MUTED,font=ctk.CTkFont(size=11),anchor='w',wraplength=640,justify='left').grid(
+            row=6,column=0,columnspan=3,sticky='ew',padx=18,pady=(8,0))
+        actions=ctk.CTkFrame(win,fg_color='transparent')
+        actions.grid(row=7,column=0,columnspan=3,sticky='ew',padx=18,pady=16)
+        state={'ok':True,'token':0}
+        run_button=ctk.CTkButton(actions,text='다시 생성',width=110)
+        run_button.pack(side='right')
+        ctk.CTkButton(actions,text='취소',width=80,fg_color=theme.SURFACE,text_color=theme.TEXT,hover_color=theme.SELECT,
+                      command=win.destroy).pack(side='right',padx=(0,8))
+
+        def show(text,kind='muted'):
+            if not win.winfo_exists():return
+            color={'ok':('#217A52','#83D5AB'),'warn':theme.DANGER,'muted':theme.MUTED}[kind]
+            status.configure(text=text,text_color=color)
+
+        def check(*_):
+            state['token']+=1;token=state['token']
+            raw=self.prev_var.get();path=self._clean_path(raw)
+            if path!=raw:
+                self.prev_var.set(path)  # trace 안에서는 같은 변수 trace가 다시 불리지 않으므로 그대로 이어서 검사
+            company=company_var.get().strip()
+            if not path:
+                state['ok']=True
+                latest=latest_for_company(folder,company) if company else None
+                show(('비워 두면 이 파일의 입력값을 옮깁니다: '+latest.name) if latest else
+                     ('이 회사의 기존 BC조서가 저장 폴더에 없어 입력값 이식 없이 새로 만듭니다.' if company else
+                      '회사를 먼저 고르세요.' if names else
+                      '이 저장 폴더에는 저장된 출력본이 없습니다. 02의 저장 폴더를 확인하세요.'),
+                     'muted' if names else 'warn')
+                return
+            p=Path(path)
+            if not p.is_file() or p.suffix.lower() not in ('.xlsx','.xlsm'):
+                state['ok']=False;show('파일을 찾지 못했거나 엑셀(.xlsx·.xlsm)이 아닙니다.','warn');return
+            state['ok']=False;show('파일을 읽는 중입니다…')
+            def read():
+                try:
+                    from carry_over import collect_inputs
+                    count=sum(len(v) for v in collect_inputs(p).values());error=''
+                except Exception as exc:
+                    count=0;error=str(exc)
+                def done():
+                    if token!=state['token'] or not win.winfo_exists():return
+                    if error:
+                        state['ok']=False;show('이 엑셀을 BC조서로 읽지 못했습니다: '+error,'warn');return
+                    state['ok']=True
+                    owner=workbook_company(p)
+                    if not company_var.get().strip() and owner:
+                        match=next((n for n in names if normalized(n)==normalized(owner)),'')
+                        if match:
+                            company_var.set(match);return  # 회사 변경으로 다시 확인된다
+                    text=f'읽음: {p.name} · 옮길 입력값 {count}건'
+                    if owner and company_var.get() and normalized(owner)!=normalized(company_var.get()):
+                        show(text+f'\n파일명의 회사({owner})와 선택한 회사가 다릅니다. 확인하세요.','warn')
+                    else:show(text,'ok')
+                if not self._closed:self.after(0,done)
+            threading.Thread(target=read,daemon=True).start()
+
+        def on_drop(event):
+            files=self.tk.splitlist(event.data)
+            if files:self.prev_var.set(files[0])
+            drop.configure(border_color=theme.LINE)
+            return event.action
+        def enter(event):
+            drop.configure(border_color=theme.ACCENT);return event.action
+        def leave(event):
+            drop.configure(border_color=theme.LINE);return event.action
+        if self._dnd_ok:
+            targets=[drop,drop_label]
+            for parent in (drop,drop_label):targets+=parent.winfo_children()
+            for widget in targets:
+                try:
+                    widget.drop_target_register(DND_FILES)
+                    widget.dnd_bind('<<Drop>>',on_drop)
+                    widget.dnd_bind('<<DropEnter>>',enter)
+                    widget.dnd_bind('<<DropLeave>>',leave)
+                except Exception:pass
+        trace_prev=self.prev_var.trace_add('write',check)
+        company_var.trace_add('write',check)
+        def closed(event):
+            if event.widget is win:
+                try:self.prev_var.trace_remove('write',trace_prev)
+                except Exception:pass
+        win.bind('<Destroy>',closed)
+
+        def start():
+            company=company_var.get().strip()
+            if names and not company:
+                show('회사를 먼저 고르세요.','warn');return
+            if not state['ok']:
+                show('기존 BC조서 파일을 확인한 뒤 다시 누르세요.','warn');return
+            prev=self._clean_path(self.prev_var.get())
+            wolbo=self._clean_path(wolbo_var.get())
+            self.wolbo_var.set(wolbo)
+            win.destroy()
+            self._regenerate(folder,company or None,Path(prev) if prev else None,Path(wolbo) if wolbo else None)
+        run_button.configure(command=start)
+        self._regen_start=start;self._regen_company=company_var;self._regen_status=status
+        check()
+        theme.titlebar(win);self._raise_settings(win)
+
+    def _regenerate(self,folder,company,prev,wolbo):
+        def run():
+            self._set_busy(True)
+            try:
+                from print_parse import build_from_prints
+                self.log(f'BC조서 다시 생성 · 회사: {company or "전체"}')
+                self.log('기존 BC조서: '+(prev.name if prev else '같은 회사의 최신 파일 자동 선택'))
+                result=build_from_prints(PrintStore(folder),log=self.log,wolbo=wolbo,prev=prev,company=company)
+                self.log('출력본 BC조서: '+str(result))
+            except Exception as exc:
+                self.log('BC조서 생성 실패: '+str(exc))
+            finally:
+                self._set_busy(False)
+        self._run_bg(run)
 
     def _launch_mop(self):
         try:
@@ -441,12 +672,14 @@ class KftcAppV3(KftcAppV2):
             if parse and self._queue_saved:
                 folder=self._print_store.folder
                 wolbo=self.wolbo_var.get().strip()
-                prev=self.prev_var.get().strip()
+                from print_storage import normalized
+                names={normalized(item.company):item.company for item,site in self._jobs}
+                company=next(iter(names.values())) if len(names)==1 else None
                 def build():
                     try:
                         from print_parse import build_from_prints
                         path=build_from_prints(PrintStore(folder),log=self.log,wolbo=Path(wolbo) if wolbo else None,
-                                              prev=Path(prev) if prev else None)
+                                              company=company)
                         self.log('출력본 BC조서: '+str(path))
                     except Exception as exc:self.log('출력본 BC조서 생성 실패: '+str(exc))
                 self._run_bg(build)
@@ -458,8 +691,9 @@ class KftcAppV3(KftcAppV2):
         prev=self.prev_var.get().strip()
         self.log('출력 이력의 현재 유효 PDF로 BC조서를 생성합니다.')
         self.log('이전 BC조서: '+prev if prev else '이전 BC조서: 저장 폴더의 최신 파일 자동 선택')
+        typed=self.filter_var.get().strip() or None
         result=build_from_prints(PrintStore(out),log=self.log,wolbo=Path(wolbo) if wolbo else None,
-                                 prev=Path(prev) if prev else None)
+                                 prev=Path(prev) if prev else None,company=typed)
         self.log('출력본 BC조서: '+str(result))
         return result
 

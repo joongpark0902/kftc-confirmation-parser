@@ -18,7 +18,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from confirm_parser import FORM_LABEL, FORM_ORDER, FORMS, SCAN_STATUS, ConfirmDoc
+from confirm_parser import FORM_LABEL, FORM_ORDER, FORMS, NA_STATUS, SCAN_STATUS, SENT_STATUS, ConfirmDoc
 
 FONT = "맑은 고딕"
 HDR_FILL = PatternFill("solid", fgColor="2F3B4C")
@@ -44,7 +44,8 @@ RIGHT = Alignment(horizontal="right", vertical="center")
 Col = tuple  # (header, width, kind)  kind: text | money | date | rate | int | no | formula
 ID_COLS: list[Col] = [("No", 8, "no"), ("조회대상회사", 20, "text"), ("금융기관", 14, "text"), ("지점", 16, "text")]
 RATE_CCY = ["KRW", "USD", "JPY", "EUR", "HKD", "CNY"]
-LEGEND = "노란 음영 = 파서가 줄바꿈으로 쪼개진 숫자를 재조립한 값(원문 PDF 확인 필요). 감사인 검토 열·회사제시금액·환율표는 빈칸(작성자 입력)."
+LEGEND = ("노란 음영 = 파서가 줄바꿈으로 쪼개진 숫자를 재조립한 값 또는 스캔본 OCR 추정(원문 PDF 확인 필요). "
+          "감사인 검토 열·회사제시금액·환율표는 빈칸(작성자 입력).")
 
 
 # ---------------------------------------------------------------------------
@@ -52,10 +53,10 @@ LEGEND = "노란 음영 = 파서가 줄바꿈으로 쪼개진 숫자를 재조�
 # ---------------------------------------------------------------------------
 def _fallback_identity(doc: ConfirmDoc):
     """스캔본 등 헤더를 못 읽은 문서: 파일명 '회사-조회서(기관).pdf'에서 추정"""
-    stem = doc.source.path.stem
+    stem = Path(doc.source.inner_name or doc.source.path.name).stem
     company = re.split(r"[-_]", stem, 1)[0].strip() if re.search(r"[-_]", stem) else ""
-    m = re.search(r"\(([^()]+)\)\s*$", stem)
-    inst = m.group(1).strip() if m else ""
+    groups = [g.strip() for g in re.findall(r"\(([^()]+)\)", stem) if g.strip() not in ("주", "유", "유한")]
+    inst = groups[-1] if groups else ""        # '(기관)별도문의'처럼 괄호 뒤에 글자가 붙어도 마지막 괄호
     return company, inst
 
 
@@ -71,16 +72,49 @@ def _squash(s: str) -> str:
     return re.sub(r"\s+", "", s or "")
 
 
+def _name_key(s: str) -> str:
+    s = re.sub(r"\(주\)|\(유\)|\(유한\)|㈜|주식회사|유한회사|[（）()]", "", s or "")
+    return re.sub(r"[^0-9a-z가-힣]", "", s.lower())
+
+
+def _biz(doc: ConfirmDoc) -> str:
+    return re.sub(r"\D", "", (doc.header or {}).get("biz_no", "") or "")
+
+
 def canonicalize_companies(docs: list[ConfirmDoc]) -> None:
-    """기관마다 띄어쓰기가 다른 회사명('주식회사 테스트' / '주식회사테스트')을 한 표기로 통일.
-    공백 제거 키가 같으면 같은 회사로 보고, 가장 많이 쓰인 표기를 대표로 삼는다."""
+    """같은 사업자번호의 문서는 한 이름으로(글꼴 깨짐·약칭·정식명칭 차이 흡수), 이후 공백 차이를 통일한다.
+    회사명을 못 읽은 문서(스캔본 등)의 파일명 추정 이름도 알려진 회사명과 같으면 그 이름을 쓴다."""
+    by_biz: dict[str, Counter] = {}
+    for d in docs:
+        if _biz(d) and d.company:
+            by_biz.setdefault(_biz(d), Counter())[d.company] += 1
+    known = {}
+    for c in by_biz.values():
+        name = c.most_common(1)[0][0]
+        known.setdefault(_name_key(name), name)
+    for d in docs:
+        if d.company and not _biz(d):
+            known.setdefault(_name_key(d.company), d.company)
+
+    def base(d: ConfirmDoc) -> str:
+        if _biz(d) in by_biz:
+            return by_biz[_biz(d)].most_common(1)[0][0]
+        if d.company:
+            return d.company
+        stem = Path(d.source.inner_name or d.source.path.name).stem
+        for tok in re.split(r"[-_]", stem):     # '기관_회사.pdf'처럼 회사명이 뒤에 와도 알려진 회사명이면 채택
+            if _name_key(tok) in known:
+                return known[_name_key(tok)]
+        guess = _fallback_identity(d)[0]
+        return known.get(_name_key(guess), guess) if guess else ""
+
+    names = {id(d): base(d) for d in docs}
     by_key: dict[str, Counter] = {}
     for d in docs:
-        raw = d.company or _fallback_identity(d)[0]
-        if raw:
-            by_key.setdefault(_squash(raw), Counter())[raw] += 1
+        if names[id(d)]:
+            by_key.setdefault(_squash(names[id(d)]), Counter())[names[id(d)]] += 1
     for d in docs:
-        raw = d.company or _fallback_identity(d)[0]
+        raw = names[id(d)]
         d.canonical_company = by_key[_squash(raw)].most_common(1)[0][0] if raw else ""
 
 
@@ -133,7 +167,10 @@ def assign_numbers(docs: list[ConfirmDoc], client: Optional[str] = None, bc_map:
 # ---------------------------------------------------------------------------
 def _date(v):
     if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
-        return dt.date.fromisoformat(v)
+        try:
+            return dt.date.fromisoformat(v)
+        except ValueError:          # 원문 '0000-00-00' 등
+            return v
     return v if v else ""
 
 
@@ -321,7 +358,9 @@ def _fx_formula(ccy_col: int, amt_col: int, rate_ref: str) -> Callable[[int], st
 # ---------------------------------------------------------------------------
 def _note_for(doc: ConfirmDoc) -> str:
     if doc.status == SCAN_STATUS:
-        return SCAN_STATUS
+        return SCAN_STATUS + (f" · {doc.message}" if doc.ocr_pages is not None else "")
+    if doc.status in (NA_STATUS, SENT_STATUS):
+        return doc.status
     if doc.status != "성공":
         return f"{doc.status}: {doc.message}"
     specs = FORMS[doc.form]
@@ -356,10 +395,12 @@ def sheet_cs(wb, ctx: Ctx):
     for d in ctx.docs:
         inst, br = doc_institution(d), d.footer.get("branch", "")
         received = f"V ({d.footer['issue_date']})" if d.footer.get("issue_date") else ("V (스캔본)" if d.is_scan else "V")
+        if d.status == SENT_STATUS:
+            received = "-"               # 회사가 보낸 요청 서식: 회신이 아님
         rows.append([d.bc, doc_company(d), f"{inst}({br})" if br else inst, d.form_label if d.form else ("미상" if d.is_scan else "-"),
-                     "전자조회" if d.form else "", d.footer.get("officer", ""), d.footer.get("phone", ""), "",
+                     ("전자조회" if d.form != "card" else "") if d.form else "", d.footer.get("officer", ""), d.footer.get("phone", ""), "",
                      "V", received, d.bc_label, _note_for(d)])
-        flags.append(set())
+        flags.append({"비고"} if d.ocr_pages is not None else set())
     assert r + 2 == list_first, (r, list_first)
     _block(ws, r, "2. 발송 및 회수 리스트", cols, rows, flags)
     ws.freeze_panes = ws.cell(list_first, 4)
@@ -442,7 +483,7 @@ def sheet_monthly(wb, ctx: Ctx):
     from wolbo_parser import UNIT, match_institution
     winsts = w.all_institutions() if w else []
     targets = [d for d in ctx.docs if d.status == "성공" and (doc_company(d) == ctx.client
-               or any(_sec(d, n) and _sec(d, n)["rows"] for n in ({"bank": (2, 3), "insurance": (2, 3), "guarantee": (4, 6)}[d.form])))]
+               or any(_sec(d, n) and _sec(d, n)["rows"] for n in ({"bank": (2, 3), "insurance": (2, 3), "guarantee": (4, 6), "securities": (3, 4), "card": (1,)}[d.form])))]
     blocks: list[tuple] = []          # (기관표시명, 회사, doc|None, 월보기관명|None)
     used = set()
     for d in targets:
@@ -612,11 +653,24 @@ def sheet_securities(wb, ctx: Ctx):
     cols1 = ID_COLS + [("계좌번호", 18, "text"), ("금융상품의 종류", 18, "text"), ("금융상품 금액", 16, "money"), ("예수금", 14, "money"),
                        ("신용설정 보증금", 14, "money"), ("미수금액", 14, "money"), ("담보제공 및 처분제한 등", 20, "text")]
     r = _head(ws, ctx, "금융거래조회서 Control Sheet_유가증권 등", "BC-130-1-1", len(cols1))
-    r, *_ = _block(ws, r, "1. 조회기준일 현재 당사가 보유하고 있는 조회대상회사의 유가증권 등 금융상품의 내용은 다음과 같습니다.", cols1, [],
-                   note="증권회사용 조회서 샘플이 없어 표 추출 미지원(향후 추가). 머리글만 제공.")
+    s1 = FORMS["securities"][1]
+    rows, flags = [], []
+    for d, n, row in _rows_of(ctx.docs, {"securities": 1}):
+        rows.append(_ids(d) + [row["계좌번호"], row["금융상품의 종류"], _money(row, "금융상품 금액"), _money(row, "예수금"),
+                               _money(row, "신용설정 보증금"), _money(row, "미수금액"), row["담보제공 및 처분제한 등"]])
+        flags.append(_flag_set(row))
+    r, *_ = _block(ws, r, "1. 조회기준일 현재 당사가 보유하고 있는 조회대상회사의 유가증권 등 금융상품의 내용은 다음과 같습니다.", cols1, rows, flags,
+                   subtotal=("금융상품 금액", "예수금", "신용설정 보증금", "미수금액"),
+                   note="증권회사 조회서 9번(기중 거래내역)은 원본추출 시트에 있습니다.")
     cols2 = ID_COLS + [("계좌번호", 18, "text"), ("종목명", 24, "text"), ("수량", 12, "money"), ("액면금액", 14, "money"), ("기준가", 12, "money"),
                        ("평가액", 16, "money"), ("만기일", 12, "date"), ("담보제공", 10, "text"), ("비고", 16, "text")]
-    _block(ws, r, "2. 조회기준일 현재 당사가 보유하고 있는 조회대상회사의 유가증권 등 금융상품의 상세명세는 다음과 같습니다.", cols2, [])
+    rows, flags = [], []
+    for d, n, row in _rows_of(ctx.docs, {"securities": 2}):
+        rows.append(_ids(d) + [row["계좌번호"], row["종목명"], _money(row, "수량"), _money(row, "액면금액"), _money(row, "기준가"),
+                               _money(row, "평가액"), _dt(row, "만기일"), row["담보제공 내역"], row["비고"]])
+        flags.append(_flag_set(row))
+    _block(ws, r, "2. 조회기준일 현재 당사가 보유하고 있는 조회대상회사의 유가증권 등 금융상품의 상세명세는 다음과 같습니다.", cols2, rows, flags,
+           subtotal=("평가액",))
 
 
 def sheet_loans(wb, ctx: Ctx):
@@ -629,13 +683,14 @@ def sheet_loans(wb, ctx: Ctx):
     rate_ref = _rate_table(ws, len(cols) + 2)
     rows, flags = [], []
     seen = set()
-    for d, n, row in _rows_of(ctx.docs, {"bank": 2, "insurance": 2, "guarantee": 4}):
+    for d, n, row in _rows_of(ctx.docs, {"bank": 2, "insurance": 2, "guarantee": 4, "securities": 3}):
         spec = FORMS[d.form][n]
-        v = [row[c] for c in spec.columns]          # 9열 위치 고정: 종류, 한도, 금액, 대출일, 만기, 이율, 이자지급일, 상환, 담보
-        k_lim, k_amt, k_d1, k_d2, k_rt, k_d3 = spec.columns[1], spec.columns[2], spec.columns[3], spec.columns[4], spec.columns[5], spec.columns[6]
-        memo = ""
+        cols9 = spec.columns[1:] if spec.columns[0] == "계좌번호" else spec.columns
+        v = [row[c] for c in cols9]                 # 9열 위치 고정: 종류, 한도, 금액, 대출일, 만기, 이율, 이자지급일, 상환, 담보
+        k_lim, k_amt, k_d1, k_d2, k_rt, k_d3 = cols9[1], cols9[2], cols9[3], cols9[4], cols9[5], cols9[6]
+        memo = f"계좌 {row['계좌번호']}" if spec.columns[0] == "계좌번호" and row.get("계좌번호") else ""
         if id(d) not in seen and _sec(d, n)["extra"].get("총 한도액"):
-            memo = f"총 한도액: {_sec(d, n)['extra']['총 한도액']}"
+            memo = (memo + "; " if memo else "") + f"총 한도액: {_sec(d, n)['extra']['총 한도액']}"
         seen.add(id(d))
         rows.append(_ids(d) + [v[0], _ccy(row, k_amt) or _ccy(row, k_lim) or "KRW", _money(row, k_lim), _money(row, k_amt),
                                _fx_formula(6, 8, rate_ref), _dt(row, k_d1), _dt(row, k_d2), _rate(row, k_rt), _dt(row, k_d3),
@@ -665,7 +720,7 @@ def sheet_guarantees(wb, ctx: Ctx):
                       ("기간", 18, "text"), ("담보지급보증", 20, "text"), ("비고", 20, "text")]
     r = _head(ws, ctx, "금융거래조회서 Control Sheet_지급보증 및 기타약정", "BC-130-3", len(cols))
     rows, flags = [], []
-    for d, n, row in _rows_of(ctx.docs, {"bank": 3, "insurance": 3, "guarantee": 6}):
+    for d, n, row in _rows_of(ctx.docs, {"bank": 3, "insurance": 3, "guarantee": 6, "securities": 4, "card": 1}):
         rows.append(_ids(d) + [row.get("내용", ""), _money(row, "한도액"), _money(row, "실행금액"), _rate(row, "지급보증수수료율"),
                                row.get("기간", ""), row.get("담보지급보증", row.get("담보·지급보증", "")), row.get("비고", "")])
         flags.append({h for h in ("한도액", "실행금액") if row["_flags"].get(h)})
@@ -682,7 +737,14 @@ def sheet_derivatives(wb, ctx: Ctx):
     for d, n, row in _rows_of(ctx.docs, {"bank": 4}):
         rows.append(_ids(d) + [_money(row, c) if c in spec.money else (_dt(row, c) if c in spec.dates else row[c]) for c in spec.columns])
         flags.append(_flag_set(row))
-    _block(ws, r, "1. 조회기준일 현재 조회대상회사의 미결제파생상품계약 등(선물환, 스왑, 옵션 등)의 내용은 다음과 같습니다.", cols, rows, flags)
+    r, *_ = _block(ws, r, "1. 조회기준일 현재 조회대상회사의 미결제파생상품계약 등(선물환, 스왑, 옵션 등)의 내용은 다음과 같습니다.", cols, rows, flags)
+    s5 = FORMS["securities"][5]
+    cols = ID_COLS + [(c, 16, "money" if c in s5.money else ("date" if c in s5.dates else "text")) for c in s5.columns]
+    rows, flags = [], []
+    for d, n, row in _rows_of(ctx.docs, {"securities": 5}):
+        rows.append(_ids(d) + [_money(row, c) if c in s5.money else (_dt(row, c) if c in s5.dates else row[c]) for c in s5.columns])
+        flags.append(_flag_set(row))
+    _block(ws, r, "2. [증권회사] 조회기준일 현재 조회대상회사의 미결제 파생상품 계약 등의 내용은 다음과 같습니다.", cols, rows, flags)
 
 
 def sheet_third_party(wb, ctx: Ctx):
@@ -692,7 +754,7 @@ def sheet_third_party(wb, ctx: Ctx):
                       ("금액 대사_계약서 및 명세서", 16, "text")]
     r = _head(ws, ctx, "금융거래조회서 Control Sheet_담보 및 연대보증(제공)", "BC-130-5", len(cols))
     rows, flags = [], []
-    for d, n, row in _rows_of(ctx.docs, {"bank": 5, "insurance": 5, "guarantee": 8}):
+    for d, n, row in _rows_of(ctx.docs, {"bank": 5, "insurance": 5, "guarantee": 8, "securities": 6}):
         spec = FORMS[d.form][n]
         v = [row[c] for c in spec.columns]
         rows.append(_ids(d) + [v[0], v[1], v[2], _money(row, spec.columns[3]), v[4], "", ""])
@@ -709,7 +771,7 @@ def sheet_notes(wb, ctx: Ctx):
          [("구분", 14, "text"), ("교부일자", 12, "date"), ("매수", 8, "int"), ("일련번호", 24, "text")]),
         ("2. 조회기준일 현재 미발행·미결제 전자어음 및 미회수 어음수표", {"bank": 7},
          [("구분", 14, "text"), ("만기일자/교부일자", 14, "text"), ("금액/매수", 14, "text"), ("일련번호", 24, "text")]),
-        ("3. 조회기준일 현재 담보·견질 목적으로 보관 중인 어음수표", {"bank": 8, "insurance": 4, "guarantee": 7},
+        ("3. 조회기준일 현재 담보·견질 목적으로 보관 중인 어음수표", {"bank": 8, "insurance": 4, "guarantee": 7, "securities": 7},
          [("구분", 14, "text"), ("번호", 16, "text"), ("금액", 16, "money"), ("발행일자", 12, "date"), ("만기일자", 12, "date"), ("담보견질의 목적", 24, "text")]),
         ("4. 기중 당좌거래명세", {"bank": 10},
          [("구분", 12, "text"), ("일자", 12, "date"), ("입금금액", 16, "money"), ("지급금액", 16, "money"), ("일련번호", 16, "text"), ("적요", 24, "text")]),
@@ -739,7 +801,7 @@ def sheet_collateral(wb, ctx: Ctx):
                       ("완전성 검토_주석 REF", 14, "text"), ("금액 대사_계약서 및 명세서", 16, "text")]
     r = _head(ws, ctx, "금융거래조회서 Control Sheet_담보·보증 내역(연대보증 등)", "BC-130-7", len(cols))
     rows, flags = [], []
-    for d, n, row in _rows_of(ctx.docs, {"bank": 9, "insurance": 6, "guarantee": 9}):
+    for d, n, row in _rows_of(ctx.docs, {"bank": 9, "insurance": 6, "guarantee": 9, "securities": 8}):
         rows.append(_ids(d) + [row.get("_group", ""), row["구분"], row["담보보증의 내용"], _ccy(row, "설정금액") or "KRW", row["소유자(제공자)"],
                                _money(row, "감정금액"), _money(row, "설정금액"), row["설정순위"], _money(row, "선순위 설정금액"), "", ""])
         flags.append({h for h in ("감정금액", "설정금액") if row["_flags"].get(h)} | ({"선순위설정금액"} if row["_flags"].get("선순위 설정금액") else set()))
@@ -830,6 +892,28 @@ def sheet_raw(wb, ctx: Ctx):
     ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}{max(len(rows), 1) + 1}"
 
 
+def sheet_ocr(wb, ctx: Ctx):
+    docs = [d for d in ctx.docs if d.ocr_pages is not None]
+    if not docs:
+        return
+    ws = wb.create_sheet("OCR판독")
+    ws.sheet_view.showGridLines = False
+    ws.cell(1, 1, "스캔본 OCR 결과(Windows 내장 OCR, 추정) — 금액·거래 여부는 반드시 원문 PDF로 확인하고 해당 시트에 직접 입력. "
+                  "OCR 값은 다른 시트에 자동 반영하지 않습니다.").font = F_NOTE
+    cols = [("No", 8, "no"), ("조회대상회사", 20, "text"), ("금융기관(파일명 추정)", 18, "text"), ("원본파일", 34, "text"),
+            ("'해당사항 없음' 문구", 10, "int"), ("금액 후보", 30, "text"), ("페이지", 6, "int"), ("OCR 텍스트", 100, "text")]
+    rows, flags = [], []
+    for d in docs:
+        sm = d.ocr_summary or {}
+        name = d.source.path.name + (f" ▸ {d.source.inner_name}" if d.source.inner_name else "")
+        for i, text in enumerate(d.ocr_pages or [""], start=1):
+            rows.append([d.bc_label, doc_company(d), doc_institution(d), name, sm.get("no_txn", 0) if i == 1 else "",
+                         ", ".join(sm.get("amounts", [])) if i == 1 else "", i, (text or "")[:32000]])
+            flags.append({"'해당사항 없음' 문구", "금액 후보"} if i == 1 else set())
+    _block(ws, 2, "", cols, rows, flags)
+    ws.freeze_panes = "A4"
+
+
 def sheet_log(wb, ctx: Ctx):
     ws = wb.create_sheet("처리로그")
     ws.sheet_view.showGridLines = False
@@ -872,6 +956,7 @@ def write_workbook(docs: list[ConfirmDoc], out_path: Path, client: Optional[str]
     sheet_monthly(wb, ctx)                     # 보증보험 시트 범위를 참조하므로 그 뒤에 만들고 3번째 자리로 옮긴다
     wb.move_sheet("월보대사", offset=2 - wb.sheetnames.index("월보대사"))
     sheet_raw(wb, ctx)
+    sheet_ocr(wb, ctx)
     sheet_log(wb, ctx)
     if inputs:
         from carry_over import apply_inputs

@@ -2,7 +2,7 @@
 """금융거래조회서 PDF/zip 폴더 → BC조서 엑셀 (누적 재생성 + 이전 버전 입력값 이식).
 
 사용법:
-  python run_parser.py <입력폴더> [--out <출력폴더>] [--client <회사명>] [--no-copy] [--wolbo <월보PDF>] [--prev <이전엑셀>|--fresh]
+  python run_parser.py <입력폴더> [--out <출력폴더>] [--client <회사명>] [--no-copy] [--wolbo <월보PDF>] [--prev <이전엑셀>|--fresh] [--no-ocr]
 
 - 원본 PDF·zip은 건드리지 않는다. zip 안 PDF는 <입력폴더>_정리/ 에
   '<조회대상회사>-<은행조회서|금융거래조회서>(<기관>).pdf' 로 풀어 저장(--no-copy 면 생략).
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pdfplumber
 
-from confirm_parser import SCAN_STATUS, iter_inputs, parse_file, save_tidy
+from confirm_parser import NA_STATUS, SCAN_STATUS, SENT_STATUS, dedupe_inputs, iter_inputs, parse_file, save_tidy
 from excel_writer import assign_numbers, write_workbook
 from wolbo_parser import is_wolbo_pdf, parse_wolbo
 
@@ -45,7 +45,7 @@ def _latest_workbook(out_dir: Path):
 
 
 def run(folder: Path, out_dir: Path | None = None, client: str | None = None, copy: bool = True, log=print,
-        wolbo: Path | None = None, prev: Path | None = None, fresh: bool = False) -> Path:
+        wolbo: Path | None = None, prev: Path | None = None, fresh: bool = False, no_prev: bool = False, ocr: bool = True) -> Path:
     folder = Path(folder)
     if not folder.is_dir():
         raise SystemExit(f"입력 폴더 없음: {folder}")
@@ -55,6 +55,10 @@ def run(folder: Path, out_dir: Path | None = None, client: str | None = None, co
     inputs = iter_inputs(folder)
     wolbo_inputs = [i for i in inputs if _is_wolbo(i)]
     inputs = [i for i in inputs if i not in wolbo_inputs]
+    inputs, dups = dedupe_inputs(inputs)
+    if dups:
+        log(f"내용이 같은 PDF {len(dups)}건은 한 번만 넣었습니다(폴더와 zip에 중복 등): "
+            + ", ".join((d.inner_name or d.path.name) for d in dups[:5]) + (" 외" if len(dups) > 5 else ""))
     log(f"입력 {len(inputs)}건 (pdf {sum(i.kind == 'pdf' for i in inputs)}, zip {sum(i.kind == 'zip' for i in inputs)})"
         + (f", 월보 PDF {len(wolbo_inputs)}건" if wolbo_inputs else ""))
     # 월보
@@ -72,7 +76,7 @@ def run(folder: Path, out_dir: Path | None = None, client: str | None = None, co
     docs = []
     used: set[str] = set()
     for i, inp in enumerate(inputs, start=1):
-        doc = parse_file(inp)
+        doc = parse_file(inp, ocr=ocr)
         if copy and inp.kind == "zip" and inp.pdf_bytes:
             save_tidy(doc, tidy_dir, used)
         docs.append(doc)
@@ -83,7 +87,7 @@ def run(folder: Path, out_dir: Path | None = None, client: str | None = None, co
     bc_map = json.loads(map_path.read_text(encoding="utf-8")) if (map_path.exists() and not fresh) else {}
     ordered, client_name = assign_numbers(docs, client, bc_map)
     map_path.write_text(json.dumps(bc_map, ensure_ascii=False, indent=1), encoding="utf-8")
-    prev_path = None if fresh else (Path(prev) if prev else _latest_workbook(out_dir))
+    prev_path = None if (fresh or no_prev) else (Path(prev) if prev else _latest_workbook(out_dir))
     inputs_prev = None
     if prev_path and prev_path.exists():
         from carry_over import collect_inputs
@@ -101,8 +105,13 @@ def run(folder: Path, out_dir: Path | None = None, client: str | None = None, co
     write_workbook(ordered, out_path, client_name, wolbo=wdoc, inputs=inputs_prev, bc_map=bc_map, stats=stats)
     ok = sum(d.status == "성공" for d in docs)
     scan = sum(d.status == SCAN_STATUS for d in docs)
-    err = len(docs) - ok - scan
-    log(f"완료: 성공 {ok} / 스캔본(수동입력) {scan} / 오류·양식미상 {err} / 이번에 새로 번호 받은 조회서 {new_cnt}건")
+    ocred = sum(d.status == SCAN_STATUS and d.ocr_pages is not None for d in docs)
+    skip = sum(d.status in (NA_STATUS, SENT_STATUS) for d in docs)
+    err = len(docs) - ok - scan - skip
+    log(f"완료: 성공 {ok} / 스캔본(수동입력) {scan}" + (f"(OCR 판독 {ocred})" if scan else "")
+        + f" / 대상아님·발송본 {skip} / 오류·양식미상 {err} / 이번에 새로 번호 받은 조회서 {new_cnt}건")
+    if scan and ocr and not ocred:
+        log("  OCR을 쓰지 못했습니다(winocr·pypdfium2 또는 Windows 한국어 OCR 없음). 스캔본은 수동 입력하세요.")
     if inputs_prev is not None:
         log(f"입력값 이식: {stats.get('carried', 0)}셀 적용, 실패 {stats.get('carry_failed', 0)}건" + (" → '이식실패' 시트 확인" if stats.get("carry_failed") else ""))
     log(f"엑셀: {out_path}")
@@ -120,8 +129,10 @@ def main(argv=None):
     ap.add_argument("--wolbo", help="월보 PDF 경로 (기본: 입력 폴더에서 자동 탐지)")
     ap.add_argument("--prev", help="입력값을 옮겨올 이전 BC조서 (기본: 출력폴더의 최신 파일)")
     ap.add_argument("--fresh", action="store_true", help="이전 버전 무시(입력값 이식·번호 고정 안 함)")
+    ap.add_argument("--no-ocr", action="store_true", help="스캔본 OCR 판독 끄기")
     a = ap.parse_args(argv)
-    run(Path(a.folder), Path(a.out) if a.out else None, a.client, not a.no_copy, wolbo=a.wolbo, prev=a.prev, fresh=a.fresh)
+    run(Path(a.folder), Path(a.out) if a.out else None, a.client, not a.no_copy, wolbo=a.wolbo, prev=a.prev, fresh=a.fresh,
+        ocr=not a.no_ocr)
 
 
 if __name__ == "__main__":
